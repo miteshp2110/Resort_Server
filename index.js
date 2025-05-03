@@ -989,7 +989,9 @@ app.post('/api/kitchen-orders/:id/create-invoice', authenticateToken, isReceptio
 app.post('/api/invoices/:id/email', authenticateToken, async (req, res) => {
   try {
     const invoiceId = req.params.id;
-    const { email } = req.body;
+    const [emailResult] = await pool.query("select email from guests where id = (select guest_id from invoices where id = ?)",[invoiceId]);
+
+    const email = emailResult[0].email
     
     if (!email) {
       return res.status(400).json({ message: 'Email address is required' });
