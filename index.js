@@ -1372,6 +1372,367 @@ app.get('/api/reports/dashboard', authenticateToken, async (req, res) => {
   }
 });
 
+
+
+
+app.get('/api/invoices/aggregated/resort', async (req, res) => {
+  try {
+    const { from_date, to_date, guest_name } = req.query;
+    
+    if (!from_date || !to_date) {
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Both from_date and to_date are required' 
+      });
+    }
+
+    // Format dates for query
+    const formattedFromDate = new Date(from_date).toISOString().split('T')[0];
+    const formattedToDate = new Date(to_date).toISOString().split('T')[0] + ' 23:59:59';
+
+    // Base query parts
+    let guestWhereCondition = '';
+    
+    if (guest_name) {
+      guestWhereCondition = 'AND i.guest_name LIKE ?';
+    }
+
+    // Get resort invoices
+    const invoiceQuery = `
+      SELECT 
+        i.id, 
+        i.invoice_number, 
+        i.invoice_date, 
+        i.guest_id,
+        i.room_number,
+        i.guest_name, 
+        i.guest_mobile,
+        i.subtotal, 
+        i.tax_amount, 
+        i.total_amount,
+        i.payment_status,
+        i.payment_method,
+        i.notes,
+        i.created_at,
+        u.username as created_by_username,
+        u.full_name as created_by_name
+      FROM 
+        invoices i
+        LEFT JOIN users u ON i.created_by = u.id
+      WHERE 
+        i.type = 'resort'
+        AND i.invoice_date BETWEEN ? AND ?
+        ${guestWhereCondition}
+      ORDER BY 
+        i.invoice_date ASC
+    `;
+    
+    // Prepare parameters for the invoice query
+    const invoiceParams = guest_name 
+      ? [formattedFromDate, formattedToDate, `%${guest_name}%`] 
+      : [formattedFromDate, formattedToDate];
+    
+    const [invoices] = await pool.query(invoiceQuery, invoiceParams);
+    
+    if (invoices.length === 0) {
+      return res.status(404).json({ 
+        status: 'error', 
+        message: 'No resort invoices found for the given date range and guest name' 
+      });
+    }
+    
+    // Get invoice items for all the invoices
+    const invoiceIds = invoices.map(inv => inv.id);
+    
+    const itemsQuery = `
+      SELECT 
+        ii.id,
+        ii.invoice_id, 
+        ii.item_id, 
+        ii.service_id,
+        ii.item_name, 
+        ii.quantity, 
+        ii.rate, 
+        ii.gst_percentage, 
+        ii.gst_amount, 
+        ii.total,
+        ii.booking_date,
+        CASE 
+          WHEN ii.item_id IS NOT NULL THEN 'menu_item'
+          WHEN ii.service_id IS NOT NULL THEN 'service'
+          ELSE 'other'
+          END as item_type
+      FROM 
+        invoice_items ii
+      WHERE 
+        ii.invoice_id IN (?)
+      ORDER BY 
+        ii.booking_date ASC, ii.invoice_id ASC
+    `;
+    
+    const [items] = await pool.query(itemsQuery, [invoiceIds]);
+    
+    // Get resort information for the invoice header
+    const [resortInfo] = await pool.query('SELECT * FROM settings LIMIT 1');
+    
+    // Group invoice items by invoice
+    const invoiceItemsMap = items.reduce((acc, item) => {
+      if (!acc[item.invoice_id]) {
+        acc[item.invoice_id] = [];
+      }
+      acc[item.invoice_id].push(item);
+      return acc;
+    }, {});
+    
+    // Attach items to their respective invoices
+    invoices.forEach(invoice => {
+      invoice.items = invoiceItemsMap[invoice.id] || [];
+    });
+    
+    // Calculate aggregated totals
+    const aggregatedData = {
+      resort_info: resortInfo[0],
+      date_range: {
+        from_date: from_date,
+        to_date: to_date
+      },
+      guest_filter: guest_name || 'All Guests',
+      invoices: invoices,
+      summary: {
+        total_invoices: invoices.length,
+        total_subtotal: 0,
+        total_tax: 0,
+        total_amount: 0,
+        payment_status_summary: {
+          paid: 0,
+          pending: 0,
+          cancelled: 0
+        },
+        payment_method_summary: {
+          cash: 0,
+          card: 0,
+          upi: 0,
+          other: 0
+        }
+      }
+    };
+    
+    // Calculate summary totals
+    invoices.forEach(invoice => {
+      aggregatedData.summary.total_subtotal += parseFloat(invoice.subtotal);
+      aggregatedData.summary.total_tax += parseFloat(invoice.tax_amount);
+      aggregatedData.summary.total_amount += parseFloat(invoice.total_amount);
+      
+      // Count by payment status
+      if (invoice.payment_status) {
+        aggregatedData.summary.payment_status_summary[invoice.payment_status]++;
+      }
+      
+      // Count by payment method
+      if (invoice.payment_method) {
+        aggregatedData.summary.payment_method_summary[invoice.payment_method]++;
+      }
+    });
+    
+    res.json({
+      status: 'success',
+      data: aggregatedData
+    });
+    
+  } catch (error) {
+    console.error('Error generating aggregated resort invoice:', error);
+    res.status(500).json({ 
+      status: 'error', 
+      message: 'Failed to generate aggregated resort invoice', 
+      error: error.message 
+    });
+  }
+});
+
+app.get('/api/invoices/aggregated/kitchen', async (req, res) => {
+  try {
+    const { from_date, to_date, guest_name } = req.query;
+    
+    if (!from_date || !to_date) {
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Both from_date and to_date are required' 
+      });
+    }
+
+    // Format dates for query
+    const formattedFromDate = new Date(from_date).toISOString().split('T')[0];
+    const formattedToDate = new Date(to_date).toISOString().split('T')[0] + ' 23:59:59';
+
+    // Base query parts
+    let guestWhereCondition = '';
+    
+    if (guest_name) {
+      guestWhereCondition = 'AND i.guest_name LIKE ?';
+    }
+
+    // Get kitchen invoices
+    const invoiceQuery = `
+      SELECT 
+        i.id, 
+        i.invoice_number, 
+        i.invoice_date, 
+        i.guest_id,
+        i.room_number,
+        i.guest_name, 
+        i.guest_mobile,
+        i.subtotal, 
+        i.tax_amount, 
+        i.total_amount,
+        i.payment_status,
+        i.payment_method,
+        i.notes,
+        i.created_at,
+        u.username as created_by_username,
+        u.full_name as created_by_name,
+        ko.order_number,
+        ko.order_type
+      FROM 
+        invoices i
+        LEFT JOIN users u ON i.created_by = u.id
+        LEFT JOIN kitchen_orders ko ON i.id = ko.invoice_id
+      WHERE 
+        i.type = 'kitchen'
+        AND i.invoice_date BETWEEN ? AND ?
+        ${guestWhereCondition}
+      ORDER BY 
+        i.invoice_date ASC
+    `;
+    
+    // Prepare parameters for the invoice query
+    const invoiceParams = guest_name 
+      ? [formattedFromDate, formattedToDate, `%${guest_name}%`] 
+      : [formattedFromDate, formattedToDate];
+    
+    const [invoices] = await pool.query(invoiceQuery, invoiceParams);
+    
+    if (invoices.length === 0) {
+      return res.status(404).json({ 
+        status: 'error', 
+        message: 'No kitchen invoices found for the given date range and guest name' 
+      });
+    }
+    
+    // Get invoice items for all the invoices
+    const invoiceIds = invoices.map(inv => inv.id);
+    
+    const itemsQuery = `
+      SELECT 
+        ii.id,
+        ii.invoice_id, 
+        ii.item_id, 
+        ii.item_name, 
+        ii.quantity, 
+        ii.rate, 
+        ii.gst_percentage, 
+        ii.gst_amount, 
+        ii.total,
+        ii.booking_date,
+        'menu_item' as item_type,
+        mi.description as item_description
+      FROM 
+        invoice_items ii
+        LEFT JOIN menu_items mi ON ii.item_id = mi.id
+      WHERE 
+        ii.invoice_id IN (?)
+      ORDER BY 
+        ii.booking_date ASC, ii.invoice_id ASC
+    `;
+    
+    const [items] = await pool.query(itemsQuery, [invoiceIds]);
+    
+    // Get kitchen information for the invoice header
+    const [kitchenInfo] = await pool.query('SELECT * FROM settings LIMIT 1');
+    
+    // Group invoice items by invoice
+    const invoiceItemsMap = items.reduce((acc, item) => {
+      if (!acc[item.invoice_id]) {
+        acc[item.invoice_id] = [];
+      }
+      acc[item.invoice_id].push(item);
+      return acc;
+    }, {});
+    
+    // Attach items to their respective invoices
+    invoices.forEach(invoice => {
+      invoice.items = invoiceItemsMap[invoice.id] || [];
+    });
+    
+    // Calculate aggregated totals
+    const aggregatedData = {
+      kitchen_info: kitchenInfo[0],
+      date_range: {
+        from_date: from_date,
+        to_date: to_date
+      },
+      guest_filter: guest_name || 'All Guests',
+      invoices: invoices,
+      summary: {
+        total_invoices: invoices.length,
+        total_subtotal: 0,
+        total_tax: 0,
+        total_amount: 0,
+        order_type_summary: {
+          room: 0,
+          walk_in: 0
+        },
+        payment_status_summary: {
+          paid: 0,
+          pending: 0,
+          cancelled: 0
+        },
+        payment_method_summary: {
+          cash: 0,
+          card: 0,
+          upi: 0,
+          other: 0
+        }
+      }
+    };
+    
+    // Calculate summary totals
+    invoices.forEach(invoice => {
+      aggregatedData.summary.total_subtotal += parseFloat(invoice.subtotal);
+      aggregatedData.summary.total_tax += parseFloat(invoice.tax_amount);
+      aggregatedData.summary.total_amount += parseFloat(invoice.total_amount);
+      
+      // Count by order type
+      if (invoice.order_type) {
+        aggregatedData.summary.order_type_summary[invoice.order_type]++;
+      }
+      
+      // Count by payment status
+      if (invoice.payment_status) {
+        aggregatedData.summary.payment_status_summary[invoice.payment_status]++;
+      }
+      
+      // Count by payment method
+      if (invoice.payment_method) {
+        aggregatedData.summary.payment_method_summary[invoice.payment_method]++;
+      }
+    });
+    
+    res.json({
+      status: 'success',
+      data: aggregatedData
+    });
+    
+  } catch (error) {
+    console.error('Error generating aggregated kitchen invoice:', error);
+    res.status(500).json({ 
+      status: 'error', 
+      message: 'Failed to generate aggregated kitchen invoice', 
+      error: error.message 
+    });
+  }
+});
+
+
 // Start the server
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
